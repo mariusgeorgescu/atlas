@@ -36,7 +36,7 @@ import Data.List (nubBy)
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.List.NonEmpty qualified as NE
 import Data.Map.Strict qualified as Map
-import Data.Maybe (isNothing, maybeToList)
+import Data.Maybe (isJust, isNothing, maybeToList)
 import Data.Ratio ((%))
 import Data.Set qualified as Set
 import GeniusYield.Imports
@@ -331,23 +331,78 @@ buildTxCore ss eh pp ps cstrat ownUtxoUpdateF addrs change reservedCollateral ec
         -- This operation is `O(n)` where `n` denotes the number of UTxOs in `ownUtxos'`.
         let totalRefScriptSize = foldl' (\acc GYUTxO {..} -> acc + maybe 0 scriptSize utxoRefScript) 0 $ refInsUtxos <> map utxoFromTxInDetailed gyTxInsDetailed
             maximumRequiredCollateralValue' = maximumRequiredCollateralValue pp totalRefScriptSize
+            
+            -- Check if transaction actually needs collateral
+            -- Only Plutus scripts require collateral, not simple scripts
+            hasPlutusScriptInInputs = any (\GYTxIn {gyTxInWitness} -> case gyTxInWitness of
+              GYTxInWitnessScript {} -> True
+              _ -> False) gytxIns
+            
+            hasPlutusScriptInMint = any (\case
+              GYBuildPlutusScript {} -> True
+              _ -> False) (Map.keys gytxMint)
+            
+            isPlutusScriptWitness GYTxBuildWitnessPlutusScript {} = True
+            isPlutusScriptWitness _ = False
+            
+            hasPlutusScriptInCerts = any (maybe False isPlutusScriptWitness . gyTxCertWitness) gytxCerts
+            hasPlutusScriptInWdrls = any (isPlutusScriptWitness . gyTxWdrlWitness) gytxWdrls
+            hasPlutusScriptInVoting = any (isPlutusScriptWitness . fst) (Map.elems gytxVotingProcedures')
+            hasPlutusScriptInProposals = any (isPlutusScriptWitness . snd) gytxProposalProcedures'
+            
+            needsCollateral = hasPlutusScriptInInputs 
+                           || hasPlutusScriptInMint 
+                           || hasPlutusScriptInCerts 
+                           || hasPlutusScriptInWdrls 
+                           || hasPlutusScriptInVoting 
+                           || hasPlutusScriptInProposals
+            
             mCollateralUtxo =
-              reservedCollateral
-                <|> find
-                  ( \u ->
-                      let v = utxoValue u
-                          -- Following depends on that we allow unsafe, i.e., negative coins count below. In future, we can take magnitude instead.
-                          vWithoutMaxCollPledge = v `valueMinus` maximumRequiredCollateralValue'
-                          worstCaseCollOutput = mkGYTxOutNoDatum change vWithoutMaxCollPledge
-                       in -- @vWithoutMaxCollPledge@ should satisfy minimum ada requirement.
+              if needsCollateral || isJust reservedCollateral
+                then reservedCollateral
+                  <|> find
+                    ( \u ->
+                        let v = utxoValue u
+                            -- Following depends on that we allow unsafe, i.e., negative coins count below. In future, we can take magnitude instead.
+                            vWithoutMaxCollPledge = v `valueMinus` maximumRequiredCollateralValue'
+                            worstCaseCollOutput = mkGYTxOutNoDatum change vWithoutMaxCollPledge
+                         in -- @vWithoutMaxCollPledge@ should satisfy minimum ada requirement.
 
-                          v `valueGreaterOrEqual` maximumRequiredCollateralValue'
-                            && minimumUTxO pp worstCaseCollOutput <= fromInteger (valueAssetClass vWithoutMaxCollPledge GYLovelace)
-                  ) -- Keeping it simple.
-                  (utxosToList ownUtxos')
+                            v `valueGreaterOrEqual` maximumRequiredCollateralValue'
+                              && minimumUTxO pp worstCaseCollOutput <= fromInteger (valueAssetClass vWithoutMaxCollPledge GYLovelace)
+                    ) -- Keeping it simple.
+                    (utxosToList ownUtxos')
+                else Nothing
 
         case mCollateralUtxo of
-          Nothing -> return (Left GYBuildTxNoSuitableCollateral)
+          Nothing 
+            | needsCollateral -> return (Left GYBuildTxNoSuitableCollateral)
+            | otherwise -> 
+                -- Transaction doesn't need collateral, but buildEnvWith requires a GYUTxO
+                -- Since needsCollateral is False, balanceTxStep will set collaterals to mempty
+                -- We can use any UTxO from ownUtxos' as a dummy (it won't be used)
+                case someTxOutRef ownUtxos' of
+                  Nothing -> return (Left GYBuildTxNoSuitableCollateral) -- Shouldn't happen if transaction is valid
+                  Just (dummyRef, _) ->
+                    case utxosLookup dummyRef ownUtxos' of
+                      Nothing -> return (Left GYBuildTxNoSuitableCollateral) -- Shouldn't happen
+                      Just dummyCollateral ->
+                        buildUnsignedTxBody
+                          (buildEnvWith ownUtxos' (Set.fromList refIns) dummyCollateral)
+                          cstrat
+                          gyTxInsDetailed
+                          gytxOuts
+                          (utxosFromList refInsUtxos)
+                          gytxMint'
+                          gytxWdrls
+                          gytxCerts
+                          gytxInvalidBefore
+                          gytxInvalidAfter
+                          gytxSigs
+                          gytxMetadata
+                          gytxVotingProcedures'
+                          gytxProposalProcedures'
+                          gytxDonation'
           Just collateralUtxo ->
             -- Build the transaction.
             buildUnsignedTxBody
