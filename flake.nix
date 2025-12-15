@@ -11,6 +11,7 @@
     let
       supportedSystems = [
         "x86_64-linux"
+        "aarch64-darwin"
       ];
     in
       flake-utils.lib.eachSystem supportedSystems (system:
@@ -80,7 +81,8 @@
                   nixpkgs-fmt
                 ];
                 # ???: Fix for `nix flake show --allow-import-from-derivation`
-                evalSystem = "x86_64-linux";
+                # Use the current system for evalSystem, or fallback to x86_64-linux
+                evalSystem = if system == "aarch64-darwin" then "aarch64-darwin" else "x86_64-linux";
                 inputMap = { "https://chap.intersectmbo.org/" = CHaP; };
               };
           })
