@@ -1,5 +1,7 @@
 ## Next
 
+* Fix: Only search for collateral when transaction has Plutus scripts. Previously, the library would always try to find collateral even when the transaction had no scripts that require collateral, causing `GYNoSuitableCollateralException` to be thrown unnecessarily for simple transactions without scripts.
+* Add support for aarch64-darwin in flake.nix, enabling building and development on Apple Silicon (M1/M2/M3) Macs.
 * `utxosAtAddresses` doesn't throw error when querying for empty addresses list against Maestro provider.
 
 ## 0.14.1
